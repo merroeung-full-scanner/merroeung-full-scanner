@@ -1,7 +1,7 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "merroeung-full-scanner",
-  "main": "src/index.js",
+  "main": "index.js",
   "compatibility_date": "2026-09-19",
   "keep_vars": true,
   "observability": {
