@@ -38,16 +38,48 @@ function requirePassword(request, env) {
   return env.SCANNER_PASSWORD && safeEq(supplied, env.SCANNER_PASSWORD);
 }
 
-function normalizeSupergroupId(value) {
-  const s = String(value || "").trim();
-  if (!/^-?\d+$/.test(s)) {
-    throw new Error("Group ID must be a number, for example -1004387639522");
+function normalizeGroupRef(value) {
+  let s = String(value || "").trim();
+  if (!s) throw new Error("Group @username is required.");
+
+  s = s.replace(/^https?:\/\/t\.me\//i, "").replace(/^@/, "").replace(/\/+$/, "");
+
+  if (/^-?\d+$/.test(s)) {
+    throw new Error(
+      "This group is Private. A numeric Group ID alone is not enough for this MTProto scanner. Temporarily set the group to Public, give it a username, then scan using @username."
+    );
   }
-  if (s.startsWith("-100")) return s.slice(4);
-  if (s.startsWith("-")) {
-    throw new Error("This scanner needs a Telegram supergroup ID beginning with -100.");
+
+  if (!/^[A-Za-z0-9_]{5,}$/.test(s)) {
+    throw new Error("Invalid public group username. Example: @MerRoeungScanTemp");
   }
+
   return s;
+}
+
+async function resolveInputChannel(client, groupRef) {
+  const username = normalizeGroupRef(groupRef);
+  const resolved = await client.invoke(
+    new Api.contacts.ResolveUsername({ username })
+  );
+
+  const chats = Array.isArray(resolved?.chats) ? resolved.chats : [];
+  const channel = chats.find(c => c?.id && c?.accessHash !== undefined && c?.accessHash !== null);
+
+  if (!channel) {
+    throw new Error(
+      "Could not resolve this @username to a supergroup. Make sure the group is temporarily Public, the username is correct, and the bot is still an admin."
+    );
+  }
+
+  return {
+    inputChannel: new Api.InputChannel({
+      channelId: bigInt(String(channel.id)),
+      accessHash: bigInt(String(channel.accessHash))
+    }),
+    resolvedGroupId: "-100" + String(channel.id),
+    resolvedUsername: username
+  };
 }
 
 function unixToIso(value) {
@@ -180,11 +212,6 @@ async function scanAll(env, groupId) {
   if (!apiHash) throw new Error("TG_API_HASH is missing.");
   if (!botToken) throw new Error("TELEGRAM_BOT_TOKEN is missing.");
 
-  const channelId = normalizeSupergroupId(groupId);
-  const inputChannel = new Api.InputChannel({
-    channelId: bigInt(channelId),
-    accessHash: bigInt.zero
-  });
 
   const beforeRow = await env.db.prepare(`SELECT COUNT(*) AS total FROM telegram_members`).first();
   const beforeCount = Number(beforeRow?.total || 0);
@@ -215,6 +242,9 @@ async function scanAll(env, groupId) {
       botAuthToken: botToken,
       onError: (err) => console.error("Telegram auth:", err)
     });
+
+    const resolved = await resolveInputChannel(client, groupId);
+    const inputChannel = resolved.inputChannel;
 
     while (true) {
       const result = await client.invoke(
@@ -288,7 +318,8 @@ async function scanAll(env, groupId) {
 
     return {
       ok: true,
-      groupId: String(groupId),
+      groupId: resolved.resolvedGroupId || String(groupId),
+      resolvedUsername: resolved.resolvedUsername || null,
       telegramTotal,
       scanned,
       recordsBefore: beforeCount,
@@ -344,7 +375,7 @@ function page() {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>MerRoeung Full Member Scanner</title>
+<title>MerRoeung Full Member Scanner v3.1</title>
 <style>
 *{box-sizing:border-box}body{margin:0;background:#090d16;color:#eef2ff;font-family:Arial,sans-serif}
 .wrap{max-width:920px;margin:45px auto;padding:20px}.card{background:#111827;border:1px solid #263247;border-radius:20px;padding:26px;margin-bottom:18px}
@@ -361,7 +392,7 @@ button:disabled{opacity:.55;cursor:not-allowed}.secondary{background:#1e293b;mar
 <body>
 <div class="wrap">
   <div class="card">
-    <h1>MerRoeung Full Member Scanner</h1>
+    <h1>MerRoeung Full Member Scanner v3.1</h1>
     <div class="muted">
       Scan-only mode. This page does NOT remove, ban, or change VIP expiry.
       It reads Telegram supergroup participants and saves ID / name / username into the existing D1 member table.
@@ -381,14 +412,15 @@ button:disabled{opacity:.55;cursor:not-allowed}.secondary{background:#1e293b;mar
     <label>Scanner password</label>
     <input id="password" type="password" placeholder="SCANNER_PASSWORD">
 
-    <label>Telegram Supergroup ID</label>
-    <input id="groupId" value="-1004387639522" placeholder="-100xxxxxxxxxx">
+    <label>Telegram Group @username</label>
+    <input id="groupId" value="" placeholder="@MerRoeungScanTemp">
 
     <button id="scanBtn">Scan All & Save to D1</button>
     <button class="secondary" id="statusBtn">Refresh Status</button>
 
     <p class="muted">
-      The first full scan may take a little time. Existing paid/blocked/expiry records are preserved.
+      For a private group, temporarily switch it to Public and give it a temporary username, then enter that @username here.
+      After the scan succeeds, you can switch the group back to Private. Existing paid/blocked/expiry records are preserved.
       New discovered members are saved as unpaid until you mark or verify payment in MerRoeung Admin.
     </p>
     <div id="result">Ready.</div>
@@ -468,7 +500,7 @@ export default {
         const body = await request.json().catch(() => ({}));
         const groupId = String(body.groupId || "").trim();
 
-        if (!groupId) return json({error:"groupId is required"}, 400);
+        if (!groupId) return json({error:"Group @username is required"}, 400);
 
         const result = await scanAll(env, groupId);
         return json(result);
